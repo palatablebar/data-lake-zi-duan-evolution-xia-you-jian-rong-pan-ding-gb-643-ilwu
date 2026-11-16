@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block title %}影响凭证 · fieldmap{% endblock %}
+{% block body %}
+<section class="doc-section">
+  <h1>影响凭证</h1>
+  {% if empty or not version %}
+  <p class="empty">还没有凭证。先跑批次，再形成本次影响凭证。</p>
+  {% else %}
+  <p class="lede">
+    已确认 <span class="mono st st-bad">{{ version.confirmed }}</span>
+    待补证 <span class="mono st st-warn">{{ version.pending }}</span>
+    不受影响 <span class="mono st st-ok">{{ version.unaffected }}</span>
+  </p>
+  <div class="actions">
+    <button type="button" data-evidence-action="prepare">形成/复核凭证</button>
+    <button type="button" class="ghost" data-evidence-action="publish">发布凭证</button>
+    <button type="button" class="ghost" data-evidence-action="publish-fail">发布失败演练</button>
+    <a class="btn ghost" href="/api/export/evidence.csv">导出凭证 CSV</a>
+    <a class="btn ghost" href="/api/export/evidence-edges.csv">导出边核验 CSV</a>
+    <a class="btn ghost" href="/api/export/evidence.md">导出 Markdown</a>
+    <span class="flash" data-evidence-flash></span>
+  </div>
+  <dl class="ledger">
+    <div><dt>凭证版本</dt><dd class="mono">{{ version.version_id }}</dd></div>
+    <div><dt>所属批次</dt><dd class="mono">{{ version.run_id }}</dd></div>
+    <div><dt>状态</dt><dd>{{ stage }}（{{ version.status }}）</dd></div>
+    <div><dt>凭证指纹</dt><dd class="mono" style="font-size:12px">{{ version.fingerprint[:16] }}…</dd></div>
+  </dl>
+
+  <div class="wrap-scroll">
+    <table>
+      <caption>下游凭证：每个节点一条，结论、依据字段与传播路径可逐条对账<sup class="fn">1</sup></caption>
+      <thead>
+        <tr>
+          <th>下游节点</th><th>类型</th><th>结论</th><th class="num">深度</th><th>直接</th>
+          <th>依据字段 / 引用</th><th>传播路径</th><th>路径边核验</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in records %}
+        <tr>
+          <td class="name">{{ row.node }}</td>
+          <td>{{ row.kind }}</td>
+          <td class="st {% if row.status == 'CONFIRMED' %}st-bad{% elif row.status == 'PENDING' %}st-warn{% else %}st-ok{% endif %}">
+            {{ row.status_label }}<br><span class="code" style="font-size:10px">{{ row.status }}</span>
+          </td>
+          <td class="num">{{ row.depth if row.depth is not none else '—' }}</td>
+          <td>{{ '是' if row.direct else '否' }}</td>
+          <td class="reason">
+            {% if row.basis %}
+              {% for item in row.basis %}
+              <div>
+                <span class="code">{{ item.reason|reason }}</span>
+                {{ item.label }}
+                {% if item.field_id %}<span class="mono" style="font-size:10px">[{{ item.field_id }}]</span>{% endif %}
+              </div>
+              {% endfor %}
+            {% else %}—{% endif %}
+          </td>
+          <td class="reason name" style="font-size:12px">{{ row.path_text or '—' }}</td>
+          <td class="reason" style="font-size:12px">
+            {% if row.path_edges %}
+              {% for edge in row.path_edges %}
+              <div>
+                {{ edge.from }} → {{ edge.to }}：
+                {% if edge.status == 'mutual' %}<span class="st st-ok">双方一致</span>
+                {% else %}<span class="st st-warn">单边（缺{{ edge.missing }}登记）</span>{% endif %}
+              </div>
+              {% endfor %}
+            {% else %}—{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</section>
+
+{% if edge_list %}
+<section class="doc-section">
+  <h2><span class="clause">2</span>登记边核验</h2>
+  <p class="reason">双方一致边可作为确认传播依据；单边边只保留为待补证路径，不能据此停无关任务<sup class="fn">2</sup>。</p>
+  <table>
+    <thead><tr><th>上游</th><th>下游</th><th>核验</th><th>登记方向</th><th>缺失</th><th>原因</th></tr></thead>
+    <tbody>
+      {% for edge in edge_list %}
+      <tr>
+        <td class="name">{{ edge.upstream }}</td>
+        <td class="name">{{ edge.downstream }}</td>
+        <td>
+          {% if edge.status == 'mutual' %}<span class="st st-ok">双方一致</span>
+          {% else %}<span class="st st-warn">单边</span>{% endif %}
+        </td>
+        <td class="reason">{{ edge.declared }}</td>
+        <td class="reason">{{ edge.missing or '—' }}</td>
+        <td class="reason">{% if edge.reason %}<span class="code">{{ edge.reason|reason }}</span>{% else %}—{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+{% if versions %}
+<section class="doc-section">
+  <h2><span class="clause">3</span>凭证版本历史</h2>
+  <table>
+    <thead><tr><th>版本</th><th>批次</th><th>状态</th><th class="num">记录</th>
+      <th class="num">确认</th><th class="num">待补证</th><th class="num">不受影响</th><th>发布时间</th></tr></thead>
+    <tbody>
+      {% for item in versions %}
+      <tr>
+        <td class="mono" style="font-size:12px">{{ item.version_id }}</td>
+        <td class="mono" style="font-size:12px">{{ item.run_id }}</td>
+        <td class="st {% if item.status == 'published' %}st-ok{% elif item.status == 'superseded' %}st-none{% else %}st-warn{% endif %}">{{ item.status }}</td>
+        <td class="num">{{ item.record_count }}</td>
+        <td class="num">{{ item.confirmed }}</td>
+        <td class="num">{{ item.pending }}</td>
+        <td class="num">{{ item.unaffected }}</td>
+        <td class="reason">{{ item.published_at|ts if item.published_at else '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+<aside class="notes">
+  <ol class="footnotes">
+    <li>已确认 = 直接字段/断链证据，或全程经双方一致边传播；待补证 = 只能经单边登记边到达；不受影响 = 含单边边的联合图也走不到。<a class="back" href="#main">↩</a></li>
+    <li>凭证号由批次键与凭证内容哈希推出；登记不变重跑同一审计，凭证号与行数不变，不产生重复凭证。<a class="back" href="#main">↩</a></li>
+    <li>发布在单事务内替换旧版；发布失败整体回滚，旧版凭证与批次记录完整保留。<a class="back" href="#main">↩</a></li>
+  </ol>
+</aside>
+{% endblock %}
+{% block scripts %}
+<script src="/static/evidence.js"></script>
+{% endblock %}

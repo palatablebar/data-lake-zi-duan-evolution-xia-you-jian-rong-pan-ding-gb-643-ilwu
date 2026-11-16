@@ -9,6 +9,8 @@
 - 读者 / 写者两向判定，结论分兼容、需别名、破坏三档。
 - 字段映射与别名 SQL；改名同时换类型的项不生成别名，单独列为冲突。
 - 影响面 = 引用身份解析后的反向闭包，附环、自引用、断链、单边登记。
+- 影响凭证：每个下游分已确认 / 待补证 / 不受影响三档，附依据字段、传播路径与逐边核验；单边登记只作待补证，不当确认依据。
+- 凭证幂等：凭证号由批次键与内容哈希推出，登记不变重跑不新增重复凭证；发布单事务替换，失败回滚保留完整旧版与批次记录。
 - 批次幂等：同一输入命中批次键不再新增行；基线落后的提交返回 409。
 - 迁移单 Markdown + 字段账、引用账、账目、运行清单四份导出。
 
@@ -21,6 +23,7 @@
 | M3 兼容判定 | 两向判定、原因码 | `POST /api/compat` |
 | M4 字段映射 | 映射表、别名 SQL、冲突 | `GET /api/mapping`、`/mapping` |
 | M5 影响面 | 闭包、环、断链、单边 | `GET /api/impact`、`/impact` |
+| M8 影响凭证 | 三档凭证、依据与路径、幂等发布、凭证导出 | `POST /api/evidence/prepare`、`/evidence` |
 | M6 版本批次 | 跑批次、历史、陈旧拒绝 | `POST /api/runs`、`/batches` |
 | M7 迁移单 | 条款号、账目导出 | `GET /api/export/spec.md`、`/spec` |
 
@@ -31,6 +34,8 @@
 3. 必须连与结论：`required` 放宽对读者兼容，收紧对写者破坏。
 4. 引用解析过身份：名字还在但身份换了的算断链，不允许悄悄绑到新列。
 5. 影响面 = 直接引用 + 断链节点 + 反向闭包，深度取最短跳数。
+6. 影响凭证三档：双方一致边 + 直接证据才确认；单边登记边只给待补证；联合图也走不到判不受影响。
+7. 凭证号是内容哈希，登记不变重跑不新增凭证；发布在单事务内替换，失败回滚保留旧版与批次记录。
 
 ## 定义
 
@@ -50,20 +55,21 @@ curl -s localhost:18202/api/health
 1. `/` 规格单：字段清单、采信诊断（阻断 2 行、提示 4 行）、隔离区 CSV。
 2. `/types` 类型与兼容：类型格、两向判定表、就地比较两个类型。
 3. `/mapping` 字段映射：`order_no → order_code` 的别名 SQL，`channel → pay_channel` 的冲突。
-4. `/impact` 影响面：受影响节点 4 个、1 个环、1 个自引用、2 处断链、2 处单边。
-5. `/batches` 版本历史：四账并列；「陈旧提交」验证 409。
-6. `/spec` 迁移单：6 条破坏条款，导出 Markdown 与三份 CSV。
+4. `/impact` 影响面：受影响节点 5 个、1 个环、1 个自引用、3 处断链、3 处单边。
+5. `/evidence` 影响凭证：8 个下游 = 4 已确认、1 待补证、3 不受影响；重跑不新增凭证，发布失败演练后旧版仍在。
+6. `/batches` 版本历史：四账并列；「陈旧提交」验证 409。
+7. `/spec` 迁移单：6 条破坏条款，导出 Markdown 与三份 CSV。
 
 ## 页面
 
-`/`、`/types`、`/mapping`、`/impact`、`/batches`、`/spec`，另有 `/docs` 作为接口说明。
+`/`、`/types`、`/mapping`、`/impact`、`/evidence`、`/batches`、`/spec`，另有 `/docs` 作为接口说明。
 
 ## 目录
 
 ```text
 app/                入口、配置、原因码、清单、库、渲染
-app/modules/m1..m7/ 每个模块 handler + service + 三个纯规则/读写文件
-app/templates/      base + 6 页
+app/modules/m1..m8/ 每个模块 handler + service + 纯规则/读写文件
+app/templates/      base + 7 页
 app/static/         theme / layout / components + app / table / footnote
 docs/               DEPTH、DATA-DICTIONARY、RUNBOOK
 sample_data/        5 个样例，含一个 GB18030 + CRLF + 标记的脏件

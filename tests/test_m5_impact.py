@@ -41,7 +41,7 @@ def test_impact_closure_from_sample_run(run):
     assert rows["dw.mv_user_dim"]["depth"] == 2
     assert rows["dw.mv_user_dim"]["via"] == "dw.mv_pay_daily"
     assert rows["dw.mv_order_stat"]["via"] == "broken"
-    assert [row["depth"] for row in graph["rows"]] == [1, 1, 1, 2]
+    assert [row["depth"] for row in graph["rows"]] == [1, 1, 1, 2, 2]
 
 
 def test_broken_refs_carry_reason(run):

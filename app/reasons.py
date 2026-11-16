@@ -53,6 +53,11 @@ CODES: dict[str, tuple[str, str]] = {
     "COMPATIBLE": ("兼容", "info"),
     "COMPATIBLE_BY_MAPPING": ("加别名后兼容", "warn"),
     "BREAKING": ("破坏", "break"),
+    # 影响凭证
+    "EVIDENCE_CONFIRMED": ("影响已确认", "break"),
+    "EVIDENCE_PENDING": ("单边登记，待补证", "warn"),
+    "EVIDENCE_UNAFFECTED": ("不受影响", "info"),
+    "EVIDENCE_PUBLISH_FAILED": ("凭证发布失败已回滚", "break"),
 }
 
 # 类型收窄细分，挂在明细里，不进码表

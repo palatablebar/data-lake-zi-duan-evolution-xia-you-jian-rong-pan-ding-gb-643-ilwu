@@ -49,6 +49,13 @@
       "sql": "select o.order_id from dim_order o",
       "upstream": ["dw.task_self"],
       "downstream": ["dw.task_self"]
+    },
+    {
+      "name": "ads.rpt_settle_daily",
+      "kind": "view",
+      "sql": "select 1 as placeholder from dual",
+      "upstream": ["dw.mv_pay_daily"],
+      "downstream": []
     }
   ]
 }

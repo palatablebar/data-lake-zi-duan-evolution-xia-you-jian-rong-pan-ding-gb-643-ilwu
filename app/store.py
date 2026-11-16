@@ -56,7 +56,32 @@ CREATE TABLE IF NOT EXISTS kv (
     k TEXT PRIMARY KEY,
     v TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS evidence_versions (
+    version_id     TEXT PRIMARY KEY,
+    run_id         TEXT NOT NULL,
+    batch_key      TEXT NOT NULL,
+    fingerprint    TEXT NOT NULL,
+    status         TEXT NOT NULL,
+    record_count   INTEGER NOT NULL,
+    confirmed      INTEGER NOT NULL,
+    pending        INTEGER NOT NULL,
+    unaffected     INTEGER NOT NULL,
+    created_at     TEXT NOT NULL,
+    published_at   TEXT,
+    superseded_at  TEXT
+);
+CREATE TABLE IF NOT EXISTS evidence_records (
+    evidence_id    TEXT NOT NULL,
+    version_id     TEXT NOT NULL,
+    run_id         TEXT NOT NULL,
+    node           TEXT NOT NULL,
+    status         TEXT NOT NULL,
+    payload_json   TEXT NOT NULL,
+    PRIMARY KEY (version_id, evidence_id)
+);
 CREATE INDEX IF NOT EXISTS idx_quarantine_schema ON quarantine(schema_id);
+CREATE INDEX IF NOT EXISTS idx_evidence_run ON evidence_records(run_id);
+CREATE INDEX IF NOT EXISTS idx_evidence_version_status ON evidence_versions(status);
 """
 
 
@@ -83,7 +108,8 @@ def reset() -> None:
     """测试与重建用：清空全部业务表。"""
     with _LOCK, _connect() as conn:
         conn.executescript(SCHEMA)
-        for table in ("snapshots", "runs", "quarantine", "kv"):
+        for table in ("snapshots", "runs", "quarantine", "kv",
+                      "evidence_versions", "evidence_records"):
             conn.execute(f"DELETE FROM {table}")
 
 
@@ -272,3 +298,171 @@ def get_kv(key: str, default=None):
     with _LOCK, _connect() as conn:
         row = conn.execute("SELECT v FROM kv WHERE k=?", (key,)).fetchone()
     return _loads(row["v"]) if row else default
+
+
+# ---------- 影响凭证 ----------
+
+def save_evidence_version(version: dict, records: list[dict]) -> bool:
+    """落一份草稿凭证版本；同 version_id 已存在则原样保留（幂等，不改状态）。
+
+    返回 True 表示新写入，False 表示命中已有版本。
+    """
+    with _LOCK, _connect() as conn:
+        existing = conn.execute(
+            "SELECT version_id FROM evidence_versions WHERE version_id=?",
+            (version["version_id"],),
+        ).fetchone()
+        if existing is not None:
+            return False
+        conn.execute(
+            """INSERT INTO evidence_versions (version_id, run_id, batch_key, fingerprint,
+                   status, record_count, confirmed, pending, unaffected, created_at,
+                   published_at, superseded_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                version["version_id"], version["run_id"], version["batch_key"],
+                version["fingerprint"], version["status"], int(version["record_count"]),
+                int(version["confirmed"]), int(version["pending"]),
+                int(version["unaffected"]), version["created_at"],
+                version.get("published_at"), version.get("superseded_at"),
+            ),
+        )
+        conn.executemany(
+            """INSERT OR IGNORE INTO evidence_records (evidence_id, version_id, run_id,
+                   node, status, payload_json) VALUES (?,?,?,?,?,?)""",
+            [
+                (
+                    record["evidence_id"], version["version_id"], record["run_id"],
+                    record["node"], record["status"], _dumps(record),
+                )
+                for record in records
+            ],
+        )
+        return True
+
+
+def get_evidence_version(version_id: str) -> dict | None:
+    with _LOCK, _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM evidence_versions WHERE version_id=?", (version_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_evidence_version_by_run(run_id: str, status: str | None = None) -> dict | None:
+    with _LOCK, _connect() as conn:
+        if status is None:
+            row = conn.execute(
+                "SELECT * FROM evidence_versions WHERE run_id=? ORDER BY rowid DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """SELECT * FROM evidence_versions WHERE run_id=? AND status=?
+                   ORDER BY rowid DESC LIMIT 1""",
+                (run_id, status),
+            ).fetchone()
+    return dict(row) if row else None
+
+
+def list_evidence_records(version_id: str) -> list[dict]:
+    with _LOCK, _connect() as conn:
+        rows = conn.execute(
+            "SELECT payload_json FROM evidence_records WHERE version_id=? ORDER BY node",
+            (version_id,),
+        ).fetchall()
+    return [_loads(row["payload_json"]) for row in rows]
+
+
+def count_evidence_records(version_id: str) -> int:
+    with _LOCK, _connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM evidence_records WHERE version_id=?", (version_id,)
+        ).fetchone()
+    return int(row["n"])
+
+
+def latest_published_version() -> dict | None:
+    with _LOCK, _connect() as conn:
+        row = conn.execute(
+            """SELECT * FROM evidence_versions WHERE status='published'
+               ORDER BY published_at DESC, rowid DESC LIMIT 1"""
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_evidence_versions(limit: int = 30) -> list[dict]:
+    with _LOCK, _connect() as conn:
+        rows = conn.execute(
+            """SELECT version_id, run_id, batch_key, fingerprint, status, record_count,
+                      confirmed, pending, unaffected, created_at, published_at, superseded_at
+               FROM evidence_versions ORDER BY rowid DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def publish_evidence_version(version_id: str, published_at: str) -> dict:
+    """单事务发布：草稿转 published，旧 published 转 superseded。
+
+    任一步失败整体回滚，旧版凭证保持完整可读；runs 表不在事务内改动，
+    批次记录数据不会丢失。返回发布后的版本行。
+    """
+    with _LOCK, _connect() as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            target = conn.execute(
+                "SELECT * FROM evidence_versions WHERE version_id=?", (version_id,)
+            ).fetchone()
+            if target is None:
+                conn.execute("ROLLBACK")
+                raise KeyError(version_id)
+            record_count = conn.execute(
+                "SELECT COUNT(*) AS n FROM evidence_records WHERE version_id=?",
+                (version_id,),
+            ).fetchone()["n"]
+            if record_count == 0 or record_count != target["record_count"]:
+                conn.execute("ROLLBACK")
+                raise ValueError("evidence records incomplete")
+            conn.execute(
+                """UPDATE evidence_versions SET status='superseded', superseded_at=?
+                   WHERE status='published' AND version_id<>?""",
+                (published_at, version_id),
+            )
+            conn.execute(
+                """UPDATE evidence_versions SET status='published', published_at=?
+                   WHERE version_id=?""",
+                (published_at, version_id),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    return get_evidence_version(version_id)
+
+
+def count_evidence_versions() -> int:
+    with _LOCK, _connect() as conn:
+        row = conn.execute("SELECT COUNT(*) AS n FROM evidence_versions").fetchone()
+    return int(row["n"])
+
+
+def simulate_publish_failure(version_id: str, published_at: str) -> None:
+    """故障演练：执行与真实发布相同的写操作，但在提交前回滚并抛错。
+
+    用于证明发布失败时旧 published 版本与全部凭证记录原样保留。
+    """
+    with _LOCK, _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """UPDATE evidence_versions SET status='superseded', superseded_at=?
+               WHERE status='published' AND version_id<>?""",
+            (published_at, version_id),
+        )
+        conn.execute(
+            """UPDATE evidence_versions SET status='published', published_at=?
+               WHERE version_id=?""",
+            (published_at, version_id),
+        )
+        conn.execute("ROLLBACK")
+        raise RuntimeError("simulated publish failure")

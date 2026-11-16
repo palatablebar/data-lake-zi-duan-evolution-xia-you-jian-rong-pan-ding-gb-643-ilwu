@@ -13,6 +13,7 @@ PAGES = [
     ("/types", "类型与兼容"),
     ("/mapping", "字段映射"),
     ("/impact", "影响面"),
+    ("/evidence", "影响凭证"),
     ("/batches", "版本历史"),
     ("/spec", "迁移单"),
 ]

@@ -55,3 +55,44 @@ def test_export_text_is_deterministic(client):
     assert migration.spec_markdown(run) == migration.spec_markdown(run)
     assert migration.manifest_json_text(run) == migration.manifest_json_text(run)
     assert migration.refs_csv_text(run) == migration.refs_csv_text(run)
+
+
+def test_evidence_partition_covers_all_consumers(client):
+    """凭证守恒：已确认 + 待补证 + 不受影响 = 全部下游，一个不重不漏。"""
+    from app.modules.m8_evidence import service as evidence
+
+    prepared = evidence.prepare_for_latest()
+    version = prepared["version"]
+    consumers = len(store.latest_run()["refs"]["consumers"])
+    assert version["confirmed"] + version["pending"] + version["unaffected"] == consumers
+    assert version["record_count"] == consumers
+    nodes = [record["node"] for record in prepared["records"]]
+    assert len(nodes) == len(set(nodes)) == consumers
+
+
+def test_evidence_rerun_creates_no_duplicate_versions_or_records(client):
+    from app.modules.m8_evidence import service as evidence
+
+    first = evidence.prepare_for_latest()
+    batch_service.execute()
+    evidence.prepare_for_latest()
+    evidence.prepare_for_latest()
+    assert store.count_evidence_versions() == 1
+    assert store.count_evidence_records(first["version"]["version_id"]) == \
+        first["version"]["record_count"]
+
+
+def test_failed_publish_never_deletes_run_or_records(client):
+    from app.modules.m8_evidence import service as evidence
+
+    prepared = evidence.prepare_for_latest()
+    evidence.publish(prepared["version"]["version_id"])
+    runs_before = store.count_runs()
+    try:
+        evidence.publish(prepared["version"]["version_id"], fail_after=True)
+    except RuntimeError:
+        pass
+    assert store.count_runs() == runs_before
+    assert store.latest_published_version() is not None
+    assert store.count_evidence_records(prepared["version"]["version_id"]) == \
+        prepared["version"]["record_count"]
